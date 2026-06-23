@@ -1,6 +1,6 @@
 # gif-to-plymouth
 
-Convert an animated GIF into a Plymouth boot splash theme.
+Converts an animated GIF into a Plymouth boot splash theme.
 
 `gif-to-plymouth` extracts GIF frames, renders them into PNGs, writes a Plymouth script theme, saves it under `/usr/share/plymouth/themes`, and can optionally set it as the active boot theme.
 
@@ -16,12 +16,6 @@ Or with curl:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Kuucheen/gif-to-plymouth/main/install.sh | bash
-```
-
-If your GitHub repo name or owner is different, change the URL, or pass the repo to the shell running the installer:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/owner/repo/main/install.sh | GIF_TO_PLYMOUTH_REPO=owner/repo bash
 ```
 
 The installer copies the CLI to:
@@ -177,12 +171,6 @@ Plymouth does not play GIFs directly. This tool converts the GIF into PNG frames
 
 GIF frame delays are not preserved. Playback uses a fixed hold value controlled by `--hold`.
 
-Shutdown can show a newly selected theme from `/usr/share/plymouth/themes`, while boot may still show the old theme until initramfs is rebuilt with:
-
-```bash
-pkexec plymouth-set-default-theme -R THEME_NAME
-```
-
 ## Uninstall
 
 Remove the CLI:
@@ -192,3 +180,10 @@ Remove the CLI:
 ```
 
 Generated Plymouth themes are not removed automatically.
+
+## Community
+
+If you need help with anything join our <a href="https://discord.gg/7FWAGXzhkC">discord server</a>
+<br>
+<br>
+Help me keep my projects open source by <a href="https://ko-fi.com/kuucheen">sponsoring</a> me
