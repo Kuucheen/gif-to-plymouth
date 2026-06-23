@@ -1,0 +1,347 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  gif-to-plymouth INPUT.gif THEME_NAME [options]
+
+Creates a Plymouth script theme from an animated GIF.
+
+Options:
+  --install                 Also set the theme as default and rebuild initramfs.
+                            Without this, the theme is still saved in
+                            /usr/share/plymouth/themes/THEME.
+  --output-dir DIR          Also keep a user-owned generated copy under DIR.
+  --size WIDTHxHEIGHT       Canvas size for generated frames.
+                            Default: 1280x720
+  --size-divisor N          Use the GIF's resolution divided by N as the canvas.
+                            Example: 1280x480 with N=2 becomes 640x240.
+  --fit contain|cover|none  Resize behavior. Default: contain
+  --background COLOR        Canvas background. Default: black
+  --hold N                  Plymouth refresh ticks per frame. Default: 3
+                            Plymouth refreshes up to 50 fps, so 3 ~= 16.7 fps.
+  --ping-pong               Loop forward then backward for a smoother seam.
+  --remove-leading-black    Remove dark/blank frames at the start.
+  --black-threshold N       Leading-black cutoff as ImageMagick maximum brightness.
+                            Default: 0.01
+  --help                    Show this help.
+
+Examples:
+  gif-to-plymouth boot.gif MyBoot --ping-pong
+  gif-to-plymouth boot.gif MyBoot --ping-pong --install
+  gif-to-plymouth boot.gif MyBoot --size 1920x1080 --fit cover --hold 4
+  gif-to-plymouth boot.gif MyBoot --size-divisor 2
+EOF
+}
+
+die() {
+  printf 'gif-to-plymouth: %s\n' "$*" >&2
+  exit 1
+}
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"
+}
+
+quote() {
+  printf '%q' "$1"
+}
+
+confirm_replace() {
+  local dest=$1
+  local answer
+
+  if [[ ! -e "$dest" ]]; then
+    return 0
+  fi
+
+  if [[ ! -t 0 ]]; then
+    die "theme already exists at $dest; rerun from an interactive terminal to confirm replacement"
+  fi
+
+  printf 'Theme already exists: %s\n' "$dest" >&2
+  printf 'Replace it? [y/N] ' >&2
+  read -r answer
+  case "$answer" in
+    y|Y|yes|YES|Yes)
+      return 0
+      ;;
+    *)
+      printf 'Aborted; existing theme was not changed.\n' >&2
+      exit 1
+      ;;
+  esac
+}
+
+input=${1-}
+theme=${2-}
+
+if [[ ${input:-} == "--help" || ${input:-} == "-h" ]]; then
+  usage
+  exit 0
+fi
+
+[[ -n ${input:-} ]] || { usage >&2; exit 2; }
+[[ -n ${theme:-} ]] || { usage >&2; exit 2; }
+shift 2
+
+install_theme=0
+output_root=""
+size="1280x720"
+explicit_size=0
+size_divisor=""
+fit="contain"
+background="black"
+hold="3"
+ping_pong=0
+skip_leading_black=0
+black_threshold="0.01"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --install)
+      install_theme=1
+      shift
+      ;;
+    --output-dir)
+      [[ $# -ge 2 ]] || die "--output-dir needs a value"
+      output_root=$2
+      shift 2
+      ;;
+    --size)
+      [[ $# -ge 2 ]] || die "--size needs a value"
+      size=$2
+      explicit_size=1
+      shift 2
+      ;;
+    --size-divisor)
+      [[ $# -ge 2 ]] || die "--size-divisor needs a value"
+      size_divisor=$2
+      shift 2
+      ;;
+    --fit)
+      [[ $# -ge 2 ]] || die "--fit needs a value"
+      fit=$2
+      shift 2
+      ;;
+    --background)
+      [[ $# -ge 2 ]] || die "--background needs a value"
+      background=$2
+      shift 2
+      ;;
+    --hold)
+      [[ $# -ge 2 ]] || die "--hold needs a value"
+      hold=$2
+      shift 2
+      ;;
+    --ping-pong)
+      ping_pong=1
+      shift
+      ;;
+    --remove-leading-black)
+      skip_leading_black=1
+      shift
+      ;;
+    --keep-leading-black)
+      printf 'gif-to-plymouth: --keep-leading-black is now the default; ignoring it\n' >&2
+      skip_leading_black=0
+      shift
+      ;;
+    --black-threshold)
+      [[ $# -ge 2 ]] || die "--black-threshold needs a value"
+      black_threshold=$2
+      shift 2
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown option: $1"
+      ;;
+  esac
+done
+
+[[ -f "$input" ]] || die "input does not exist: $input"
+[[ "$theme" =~ ^[A-Za-z0-9._-]+$ ]] || die "theme name may only contain letters, numbers, dots, underscores, and dashes"
+[[ "$size" =~ ^[0-9]+x[0-9]+$ ]] || die "--size must look like 1280x720"
+if [[ -n "$size_divisor" ]]; then
+  [[ "$size_divisor" =~ ^[0-9]+$ && "$size_divisor" -gt 0 ]] || die "--size-divisor must be a positive integer"
+  [[ "$explicit_size" -eq 0 ]] || die "--size and --size-divisor cannot be used together"
+fi
+[[ "$hold" =~ ^[0-9]+$ && "$hold" -gt 0 ]] || die "--hold must be a positive integer"
+case "$fit" in
+  contain|cover|none) ;;
+  *) die "--fit must be contain, cover, or none" ;;
+esac
+
+plymouth_theme_dir="/usr/share/plymouth/themes/$theme"
+confirm_replace "$plymouth_theme_dir"
+
+need magick
+need identify
+need tar
+need pkexec
+if [[ "$install_theme" -eq 1 ]]; then
+  need plymouth-set-default-theme
+fi
+
+if [[ -n "$size_divisor" ]]; then
+  read -r source_width source_height < <(identify -format '%w %h\n' "${input}[0]")
+  [[ "$source_width" =~ ^[0-9]+$ && "$source_height" =~ ^[0-9]+$ ]] || die "could not read GIF dimensions"
+  width=$((source_width / size_divisor))
+  height=$((source_height / size_divisor))
+  [[ "$width" -gt 0 && "$height" -gt 0 ]] || die "--size-divisor is too large for ${source_width}x${source_height}"
+  size="${width}x${height}"
+fi
+
+width=${size%x*}
+height=${size#*x}
+work=$(mktemp -d "${TMPDIR:-/tmp}/gif-to-plymouth.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+
+raw_dir="$work/raw"
+mkdir -p "$raw_dir"
+build_root="$work/theme-build"
+if [[ -n "$output_root" ]]; then
+  build_root="${output_root%/}"
+fi
+
+printf 'Extracting GIF frames...\n'
+magick "$input" -coalesce "$raw_dir/raw-%06d.png"
+
+mapfile -t raw_frames < <(find "$raw_dir" -maxdepth 1 -type f -name 'raw-*.png' | sort)
+[[ "${#raw_frames[@]}" -gt 0 ]] || die "no frames were extracted"
+
+theme_dir="${build_root%/}/$theme"
+rm -rf "$theme_dir"
+mkdir -p "$theme_dir"
+
+frame_count=0
+started=0
+
+printf 'Using canvas size %sx%s\n' "$width" "$height"
+printf 'Rendering Plymouth frames...\n'
+for src in "${raw_frames[@]}"; do
+  rendered="$work/rendered.png"
+  case "$fit" in
+    contain)
+      magick "$src" -resize "${width}x${height}" -background "$background" -gravity center -extent "${width}x${height}" "$rendered"
+      ;;
+    cover)
+      magick "$src" -resize "${width}x${height}^" -background "$background" -gravity center -extent "${width}x${height}" "$rendered"
+      ;;
+    none)
+      magick "$src" -background "$background" -gravity center -extent "${width}x${height}" "$rendered"
+      ;;
+  esac
+
+  if [[ "$skip_leading_black" -eq 1 && "$started" -eq 0 ]]; then
+    maximum=$(magick "$rendered" -colorspace gray -format '%[fx:maxima]' info:)
+    if awk -v maximum="$maximum" -v threshold="$black_threshold" 'BEGIN { exit !(maximum <= threshold) }'; then
+      continue
+    fi
+  fi
+
+  started=1
+  cp "$rendered" "$theme_dir/frame-${frame_count}.png"
+  frame_count=$((frame_count + 1))
+done
+
+[[ "$frame_count" -gt 0 ]] || die "all frames were skipped; retry without --remove-leading-black or with a lower --black-threshold"
+
+cat > "$theme_dir/$theme.plymouth" <<EOF
+[Plymouth Theme]
+Name=$theme
+Description=Generated from $(basename "$input") by gif-to-plymouth
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/$theme
+ScriptFile=/usr/share/plymouth/themes/$theme/$theme.script
+EOF
+
+cat > "$theme_dir/$theme.script" <<EOF
+Window.SetBackgroundTopColor(0.00, 0.00, 0.00);
+Window.SetBackgroundBottomColor(0.00, 0.00, 0.00);
+
+progress = 0;
+framehold = $hold;
+sourceframes = $frame_count;
+numberofframes = sourceframes;
+images = [];
+sprite = Sprite();
+
+for (i = 0; i < sourceframes; i++)
+{
+  images[i] = Image("frame-" + i + ".png");
+}
+
+EOF
+
+if [[ "$ping_pong" -eq 1 && "$frame_count" -gt 2 ]]; then
+  cat >> "$theme_dir/$theme.script" <<'EOF'
+frame = sourceframes;
+for (i = sourceframes - 2; i > 0; i--)
+{
+  images[frame] = images[i];
+  frame++;
+}
+numberofframes = frame;
+
+EOF
+fi
+
+cat >> "$theme_dir/$theme.script" <<'EOF'
+sprite.SetX(Window.GetWidth() / 2 - images[0].GetWidth() / 2);
+sprite.SetY(Window.GetHeight() / 2 - images[0].GetHeight() / 2);
+
+fun refresh_callback()
+{
+  sprite.SetImage(images[Math.Int(progress / framehold) % numberofframes]);
+  progress++;
+}
+
+Plymouth.SetRefreshFunction(refresh_callback);
+EOF
+
+printf 'Generated %s frames\n' "$frame_count"
+
+archive="$work/$theme.tar"
+tar -C "$build_root" -cf "$archive" "$theme"
+
+if [[ "$install_theme" -eq 1 ]]; then
+  printf 'Saving, activating, and rebuilding %s via pkexec...\n' "$theme"
+else
+  printf 'Saving %s to the Plymouth theme directory via pkexec...\n' "$theme"
+fi
+
+pkexec /bin/bash -c '
+  set -e
+  theme=$1
+  archive=$2
+  activate=$3
+  dest=/usr/share/plymouth/themes/$theme
+  rm -rf -- "$dest"
+  mkdir -p /usr/share/plymouth/themes
+  tar -C /usr/share/plymouth/themes -xf "$archive"
+  if command -v restorecon >/dev/null 2>&1; then
+    restorecon -R "$dest"
+  fi
+  if [[ "$activate" = 1 ]]; then
+    plymouth-set-default-theme -R "$theme"
+  fi
+' bash "$theme" "$archive" "$install_theme"
+
+printf 'Saved theme directory: /usr/share/plymouth/themes/%s\n' "$theme"
+if [[ "$install_theme" -eq 1 ]]; then
+  printf 'Activated and rebuilt initramfs for %s\n' "$theme"
+else
+  printf 'To activate and rebuild later, run:\n'
+  printf '  pkexec plymouth-set-default-theme -R %s\n' "$(quote "$theme")"
+fi
+
+if [[ -n "$output_root" ]]; then
+  printf 'User-owned copy: %s\n' "$theme_dir"
+fi
