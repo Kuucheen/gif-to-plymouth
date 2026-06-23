@@ -64,11 +64,19 @@ openSUSE:
 EOF
 }
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-local_source=${script_dir}/gif-to-plymouth
+script_path=${BASH_SOURCE[0]:-}
+script_dir=
+if [[ -n "$script_path" && -f "$script_path" ]]; then
+  script_dir=$(CDPATH= cd -- "$(dirname -- "$script_path")" && pwd)
+fi
+
+local_source=
+if [[ -n "$script_dir" ]]; then
+  local_source=${script_dir}/gif-to-plymouth
+fi
 tmp_source=
 
-if [[ -f "$local_source" ]]; then
+if [[ -n "$local_source" && -f "$local_source" ]]; then
   source_file=$local_source
 else
   tmp_source=$(mktemp "${TMPDIR:-/tmp}/gif-to-plymouth.XXXXXX")
